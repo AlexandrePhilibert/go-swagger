@@ -4,6 +4,7 @@
 package generate
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -75,6 +76,10 @@ func (s *SpecFile) Execute(args []string) error {
 		return err
 	}
 
+	// Set property order from Go struct field declarations so
+	// the output spec preserves the same order as the source code.
+	setPropertyOrderFromGoStructs(swspec, args, s.WorkDir, s.BuildTags)
+
 	return writeToFile(swspec, !s.Compact, s.Format, string(s.Output))
 }
 
@@ -126,14 +131,41 @@ func writeToFile(swspec *spec.Swagger, pretty bool, format string, output string
 }
 
 func marshalToJSONFormat(swspec *spec.Swagger, pretty bool) ([]byte, error) {
+	// Marshal with x-order (ensures correct property order), then strip it.
+	var b []byte
+	var err error
 	if pretty {
-		return json.MarshalIndent(swspec, "", "  ")
+		b, err = json.MarshalIndent(swspec, "", "  ")
+	} else {
+		b, err = json.Marshal(swspec)
 	}
-	return json.Marshal(swspec)
+	if err != nil {
+		return nil, err
+	}
+
+	stripped, err := stripXOrderFromJSON(b)
+	if err != nil {
+		return nil, err
+	}
+
+	if pretty {
+		var buf bytes.Buffer
+		if err := json.Indent(&buf, stripped, "", "  "); err != nil {
+			return nil, err
+		}
+		return buf.Bytes(), nil
+	}
+	return stripped, nil
 }
 
 func marshalToYAMLFormat(swspec *spec.Swagger) ([]byte, error) {
 	b, err := json.Marshal(swspec)
+	if err != nil {
+		return nil, err
+	}
+
+	// Strip x-order before converting to YAML.
+	b, err = stripXOrderFromJSON(b)
 	if err != nil {
 		return nil, err
 	}

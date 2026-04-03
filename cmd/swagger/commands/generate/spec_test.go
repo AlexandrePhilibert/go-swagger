@@ -8,6 +8,7 @@ import (
 	"flag"
 	"io"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/go-openapi/codescan"
@@ -259,6 +260,114 @@ func TestGenerateYAMLSpecWithTransparentAliases(t *testing.T) {
 	}
 
 	verifyYAMLData(t, data, expected)
+}
+
+func TestStripXOrderFromJSON(t *testing.T) {
+	t.Run("strips x-order from properties", func(t *testing.T) {
+		input := `{"definitions":{"Foo":{"properties":{"zeta":{"type":"string","x-order":0},"alpha":{"type":"string","x-order":1}}}}}`
+		result, err := stripXOrderFromJSON([]byte(input))
+		require.NoError(t, err)
+
+		var got map[string]any
+		require.NoError(t, json.Unmarshal(result, &got))
+
+		defs := got["definitions"].(map[string]any)
+		foo := defs["Foo"].(map[string]any)
+		props := foo["properties"].(map[string]any)
+		zeta := props["zeta"].(map[string]any)
+		alpha := props["alpha"].(map[string]any)
+
+		assert.NotContains(t, zeta, "x-order")
+		assert.NotContains(t, alpha, "x-order")
+		assert.Equal(t, "string", zeta["type"])
+		assert.Equal(t, "string", alpha["type"])
+	})
+
+	t.Run("preserves key order", func(t *testing.T) {
+		input := `{"b":1,"a":2,"c":3}`
+		result, err := stripXOrderFromJSON([]byte(input))
+		require.NoError(t, err)
+		// The output should preserve order: b, a, c
+		assert.Equal(t, `{"b":1,"a":2,"c":3}`, string(result))
+	})
+
+	t.Run("handles empty objects", func(t *testing.T) {
+		input := `{"x-order":0}`
+		result, err := stripXOrderFromJSON([]byte(input))
+		require.NoError(t, err)
+		assert.Equal(t, `{}`, string(result))
+	})
+}
+
+func TestSpecPropertyOrder(t *testing.T) {
+	specCmd := &SpecFile{
+		WorkDir:    "../../../../fixtures/goparsing/property-order",
+		ScanModels: true,
+		Format:     "json",
+	}
+
+	err := specCmd.Execute([]string{"./..."})
+	require.NoError(t, err)
+
+	// Re-run to capture the output
+	opts := codescan.Options{
+		WorkDir:    "../../../../fixtures/goparsing/property-order",
+		Packages:   []string{"./..."},
+		ScanModels: true,
+	}
+	swspec, err := codescan.Run(&opts)
+	require.NoError(t, err)
+
+	setPropertyOrderFromGoStructs(swspec, []string{"./..."}, "../../../../fixtures/goparsing/property-order", "")
+
+	data, err := marshalToJSONFormat(swspec, true)
+	require.NoError(t, err)
+
+	// Verify x-order is NOT in the output
+	assert.NotContains(t, string(data), "x-order")
+
+	// Verify property order in JSON matches Go struct field order.
+	// For OrderedItem: zeta, alpha, mu, beta, epsilon (NOT alphabetical)
+	jsonStr := string(data)
+
+	t.Run("OrderedItem properties follow struct field order", func(t *testing.T) {
+		foundZeta := findJSONKeyPosition(t, jsonStr, "OrderedItem", "zeta")
+		foundAlpha := findJSONKeyPosition(t, jsonStr, "OrderedItem", "alpha")
+		foundMu := findJSONKeyPosition(t, jsonStr, "OrderedItem", "mu")
+		foundBeta := findJSONKeyPosition(t, jsonStr, "OrderedItem", "beta")
+		foundEpsilon := findJSONKeyPosition(t, jsonStr, "OrderedItem", "epsilon")
+
+		assert.LessT(t, foundZeta, foundAlpha)
+		assert.LessT(t, foundAlpha, foundMu)
+		assert.LessT(t, foundMu, foundBeta)
+		assert.LessT(t, foundBeta, foundEpsilon)
+	})
+
+	t.Run("AnotherModel properties follow struct field order", func(t *testing.T) {
+		foundCharlie := findJSONKeyPosition(t, jsonStr, "AnotherModel", "charlie")
+		foundAble := findJSONKeyPosition(t, jsonStr, "AnotherModel", "able")
+		foundBaker := findJSONKeyPosition(t, jsonStr, "AnotherModel", "baker")
+
+		assert.LessT(t, foundCharlie, foundAble)
+		assert.LessT(t, foundAble, foundBaker)
+	})
+}
+
+// findJSONKeyPosition returns the byte offset of a property key
+// within a specific definition in the JSON string.
+func findJSONKeyPosition(t *testing.T, jsonStr, defName, propKey string) int {
+	t.Helper()
+
+	// Find the definition section first
+	defStart := strings.Index(jsonStr, `"`+defName+`"`)
+	require.NotEqual(t, -1, defStart, "definition %q not found", defName)
+
+	// Within the definition, find the property key
+	section := jsonStr[defStart:]
+	pos := strings.Index(section, `"`+propKey+`"`)
+	require.NotEqual(t, -1, pos, "property %q not found in definition %q", propKey, defName)
+
+	return defStart + pos
 }
 
 func verifyJSONData(t *testing.T, data, expectedJSON []byte) {
