@@ -113,19 +113,23 @@ func (g *GenOpts) validateAndFlattenSpec() (*loads.Document, error) {
 }
 
 func (g *GenOpts) analyzeSpec() (*loads.Document, *analysis.Spec, error) {
+	// Extract property order from the raw spec file before flattening.
+	// This preserves the document-order of properties in definitions,
+	// making x-order extensions unnecessary.
+	orderMap, orderErr := extractPropertyOrder(g.Spec)
+	if orderErr != nil {
+		log.Printf("warning: could not extract property order from spec: %v", orderErr)
+	}
+
 	// load, validate and flatten
 	specDoc, err := g.validateAndFlattenSpec()
 	if err != nil {
 		return nil, nil, err
 	}
 
-	// spec preprocessing option
-	if g.PropertiesSpecOrder {
-		g.Spec = WithAutoXOrder(g.Spec)
-		specDoc, err = loads.Spec(g.Spec)
-		if err != nil {
-			return nil, nil, err
-		}
+	// Apply the document-order to the in-memory (flattened) spec.
+	if orderMap != nil {
+		applyPropertyOrder(specDoc.Spec(), orderMap)
 	}
 
 	// analyze the spec
@@ -174,6 +178,120 @@ func findSwaggerSpec(nm string) (string, error) {
 	return name, nil
 }
 
+// propertyOrderMap maps a schema path (e.g. "myDefinition" or
+// "myDefinition.nestedProp") to the ordered list of property names
+// as they appear in the spec document.
+type propertyOrderMap map[string][]string
+
+// extractPropertyOrder reads the raw spec file and extracts property
+// declaration order for every definition, using yamlv2.MapSlice which
+// preserves document key order (works for both YAML and JSON).
+func extractPropertyOrder(specPath string) (propertyOrderMap, error) {
+	data, err := swag.LoadFromFileOrHTTP(specPath)
+	if err != nil {
+		return nil, err
+	}
+
+	yamlDoc, err := BytesToYAMLv2Doc(data)
+	if err != nil {
+		return nil, err
+	}
+
+	orderMap := make(propertyOrderMap)
+
+	lookFor := func(ele any, key string) (yamlv2.MapSlice, bool) {
+		if slice, ok := ele.(yamlv2.MapSlice); ok {
+			for _, v := range slice {
+				if v.Key == key {
+					if s, ok := v.Value.(yamlv2.MapSlice); ok {
+						return s, true
+					}
+				}
+			}
+		}
+		return nil, false
+	}
+
+	var extractOrder func(any, string)
+	extractOrder = func(element any, path string) {
+		props, ok := lookFor(element, "properties")
+		if !ok {
+			return
+		}
+
+		names := make([]string, 0, len(props))
+		for _, prop := range props {
+			name, ok := prop.Key.(string)
+			if !ok {
+				continue
+			}
+			names = append(names, name)
+
+			// recurse into nested object properties
+			if pSlice, ok := prop.Value.(yamlv2.MapSlice); ok {
+				extractOrder(pSlice, path+"."+name)
+			}
+		}
+		orderMap[path] = names
+	}
+
+	// walk definitions
+	if defs, ok := lookFor(yamlDoc, "definitions"); ok {
+		for _, def := range defs {
+			if defName, ok := def.Key.(string); ok {
+				extractOrder(def.Value, defName)
+			}
+		}
+	}
+
+	// walk top-level properties (e.g. inline schemas under paths)
+	extractOrder(yamlDoc, "")
+
+	return orderMap, nil
+}
+
+// applyPropertyOrder sets x-order extensions on property schemas in the
+// in-memory spec, so the existing sort-by-x-order mechanism preserves
+// the original document order.
+func applyPropertyOrder(swagger *spec.Swagger, orderMap propertyOrderMap) {
+	for defName, schema := range swagger.Definitions {
+		applyOrderToSchema(&schema, defName, orderMap)
+		swagger.Definitions[defName] = schema
+	}
+}
+
+func applyOrderToSchema(schema *spec.Schema, path string, orderMap propertyOrderMap) {
+	propNames, ok := orderMap[path]
+	if !ok {
+		return
+	}
+
+	for i, name := range propNames {
+		prop, exists := schema.Properties[name]
+		if !exists {
+			continue
+		}
+
+		// Always set x-order based on document position.
+		// This overrides any explicit x-order to match the
+		// document declaration order (same behavior as the
+		// former WithAutoXOrder).
+		if prop.Extensions == nil {
+			prop.Extensions = make(spec.Extensions)
+		}
+		prop.Extensions[xOrder] = float64(i)
+
+		// recurse into nested inline objects
+		applyOrderToSchema(&prop, path+"."+name, orderMap)
+
+		schema.Properties[name] = prop
+	}
+}
+
+// Deprecated: WithAutoXOrder is no longer needed. Property order is now
+// automatically preserved from the spec document order. This function
+// is kept for backward compatibility.
+//
 // WithAutoXOrder amends the spec to specify property order as they appear
 // in the spec (supports yaml documents only).
 //

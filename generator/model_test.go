@@ -2535,6 +2535,127 @@ func TestGenModel_KeepSpecPropertiesOrder(t *testing.T) {
 	assert.LessT(t, foundOrderInnerB, foundOrderInnerA)
 }
 
+func TestGenerateModel_AutoPropertyOrder(t *testing.T) {
+	// Test that properties follow spec document order automatically,
+	// without requiring x-order extensions.
+	ymlFile := "../fixtures/codegen/auto-property-order.yml"
+
+	// Extract property order from the raw spec
+	orderMap, err := extractPropertyOrder(ymlFile)
+	require.NoError(t, err)
+
+	specDoc, err := loads.Spec(ymlFile)
+	require.NoError(t, err)
+
+	// Apply order to in-memory spec
+	applyPropertyOrder(specDoc.Spec(), orderMap)
+
+	definitions := specDoc.Spec().Definitions
+
+	t.Run("simple definition follows spec order", func(t *testing.T) {
+		schema := definitions["orderedModel"]
+		genModel, err := makeGenDefinition("orderedModel", "models", schema, specDoc, opts())
+		require.NoError(t, err)
+
+		buf := bytes.NewBuffer(nil)
+		require.NoError(t, opts().templates.MustGet("model").Execute(buf, genModel))
+
+		ff, err := opts().LanguageOpts.FormatContent("orderedModel.go", buf.Bytes())
+		require.NoError(t, err)
+
+		res := string(ff)
+		// Spec order is: zeta, alpha, mu, beta, epsilon
+		foundZeta := strings.Index(res, "Zeta")
+		foundAlpha := strings.Index(res, "Alpha")
+		foundMu := strings.Index(res, "Mu")
+		foundBeta := strings.Index(res, "Beta")
+		foundEpsilon := strings.Index(res, "Epsilon")
+
+		assert.LessT(t, foundZeta, foundAlpha)
+		assert.LessT(t, foundAlpha, foundMu)
+		assert.LessT(t, foundMu, foundBeta)
+		assert.LessT(t, foundBeta, foundEpsilon)
+	})
+
+	t.Run("nested object follows spec order", func(t *testing.T) {
+		schema := definitions["nestedModel"]
+		o := opts()
+		genModel, err := makeGenDefinition("nestedModel", "models", schema, specDoc, o)
+		require.NoError(t, err)
+
+		buf := bytes.NewBuffer(nil)
+		require.NoError(t, o.templates.MustGet("model").Execute(buf, genModel))
+
+		ff, err := o.LanguageOpts.FormatContent("nestedModel.go", buf.Bytes())
+		require.NoError(t, err)
+
+		res := string(ff)
+		// Top-level spec order: charlie, able, innerObj
+		foundCharlie := strings.Index(res, "Charlie")
+		foundAble := strings.Index(res, "Able")
+		foundInnerObj := strings.Index(res, "InnerObj")
+		assert.LessT(t, foundCharlie, foundAble)
+		assert.LessT(t, foundAble, foundInnerObj)
+	})
+
+	t.Run("document order wins over explicit x-order", func(t *testing.T) {
+		schema := definitions["mixedModel"]
+		o := opts()
+		genModel, err := makeGenDefinition("mixedModel", "models", schema, specDoc, o)
+		require.NoError(t, err)
+
+		buf := bytes.NewBuffer(nil)
+		require.NoError(t, o.templates.MustGet("model").Execute(buf, genModel))
+
+		ff, err := o.LanguageOpts.FormatContent("mixedModel.go", buf.Bytes())
+		require.NoError(t, err)
+
+		res := string(ff)
+		// Document order always wins: noOrderZ, explicitSecond, noOrderA, explicitFirst
+		foundNoOrderZ := strings.Index(res, "NoOrderZ")
+		foundSecond := strings.Index(res, "ExplicitSecond")
+		foundNoOrderA := strings.Index(res, "NoOrderA")
+		foundFirst := strings.Index(res, "ExplicitFirst")
+
+		assert.LessT(t, foundNoOrderZ, foundSecond)
+		assert.LessT(t, foundSecond, foundNoOrderA)
+		assert.LessT(t, foundNoOrderA, foundFirst)
+	})
+}
+
+func TestGenerateModel_AutoPropertyOrder_KeepSpecOrder(t *testing.T) {
+	// Verify that the keep-spec-order fixture works with the new
+	// automatic ordering (the same spec that was used with WithAutoXOrder).
+	ymlFile := "../fixtures/codegen/keep-spec-order.yml"
+
+	orderMap, err := extractPropertyOrder(ymlFile)
+	require.NoError(t, err)
+
+	specDoc, err := loads.Spec(ymlFile)
+	require.NoError(t, err)
+	applyPropertyOrder(specDoc.Spec(), orderMap)
+
+	definitions := specDoc.Spec().Definitions
+	o := opts()
+	genModel, err := makeGenDefinition("abctype", "models", definitions["abctype"], specDoc, o)
+	require.NoError(t, err)
+
+	buf := bytes.NewBuffer(nil)
+	require.NoError(t, o.templates.MustGet("model").Execute(buf, genModel))
+
+	ff, err := o.LanguageOpts.FormatContent("keepSpecOrder.go", buf.Bytes())
+	require.NoError(t, err)
+
+	res := string(ff)
+	// Spec order: ccc, bbb, aaa, inner-object
+	foundC := strings.Index(res, "Ccc")
+	foundB := strings.Index(res, "Bbb")
+	foundA := strings.Index(res, "Aaa")
+
+	assert.LessT(t, foundC, foundB)
+	assert.LessT(t, foundB, foundA)
+}
+
 func TestGenModel_StrictAdditionalProperties(t *testing.T) {
 	specDoc, err := loads.Spec("../fixtures/codegen/strict-additional-properties.yml")
 	require.NoError(t, err)
